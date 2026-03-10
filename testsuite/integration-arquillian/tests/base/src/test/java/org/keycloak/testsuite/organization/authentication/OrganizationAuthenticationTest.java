@@ -21,18 +21,23 @@ import java.io.IOException;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import jakarta.ws.rs.core.Response;
 
 import org.keycloak.admin.client.resource.OrganizationResource;
+import org.keycloak.events.Details;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel.RequiredAction;
 import org.keycloak.models.utils.DefaultAuthenticationFlows;
 import org.keycloak.organization.authentication.authenticators.browser.OrganizationAuthenticatorFactory;
+import org.keycloak.representations.idm.EventRepresentation;
 import org.keycloak.representations.idm.OrganizationRepresentation;
 import org.keycloak.representations.idm.RealmRepresentation;
 import org.keycloak.representations.idm.UserRepresentation;
+import org.keycloak.representations.idm.UserSessionRepresentation;
 import org.keycloak.testsuite.Assert;
+import org.keycloak.testsuite.AssertEvents;
 import org.keycloak.testsuite.admin.ApiUtil;
 import org.keycloak.testsuite.organization.admin.AbstractOrganizationTest;
 import org.keycloak.testsuite.runonserver.RunOnServer;
@@ -42,6 +47,7 @@ import org.keycloak.testsuite.util.UserBuilder;
 
 import org.hamcrest.Matcher;
 import org.hamcrest.Matchers;
+import org.junit.Rule;
 import org.junit.Test;
 
 import static org.keycloak.testsuite.broker.BrokerTestTools.waitForPage;
@@ -51,6 +57,9 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
 
 public class OrganizationAuthenticationTest extends AbstractOrganizationTest {
+
+    @Rule
+    public AssertEvents events = new AssertEvents(this);
 
     @Test
     public void testAuthenticateUnmanagedMember() {
@@ -397,6 +406,103 @@ public class OrganizationAuthenticationTest extends AbstractOrganizationTest {
         
         // Clean up
         testRealm().users().get(memberId).remove();
+    }
+
+    @Test
+    public void testRememberMeWithOrganizationScope() throws IOException {
+        try (RealmAttributeUpdater rau = new RealmAttributeUpdater(testRealm())
+                .setRememberMe(Boolean.TRUE)
+                .update()) {
+
+            OrganizationResource organization = testRealm().organizations().get(createOrganization().getId());
+            UserRepresentation member = addMember(organization, "contractor@contractor.org");
+            String email = member.getEmail();
+
+            // Open the identity-first login page manually so we can interact with Remember Me before submitting
+            oauth.clientId("broker-app");
+            loginPage.open(bc.consumerRealmName());
+
+            // Identity-first page: username present, no password, Remember Me checkbox present and unchecked
+            Assert.assertTrue(loginPage.isUsernameInputPresent());
+            Assert.assertFalse(loginPage.isPasswordInputPresent());
+            Assert.assertTrue(loginPage.isRememberMeCheckboxPresent());
+            Assert.assertFalse(loginPage.isRememberMeChecked());
+
+            // Check Remember Me, then submit username
+            loginPage.setRememberMe(true);
+            Assert.assertTrue(loginPage.isRememberMeChecked());
+            loginPage.loginUsername(email);
+
+            // Wait for password page
+            waitForPage(driver, "sign in to", true);
+
+            // Password page: password present, Remember Me checkbox NOT present (hidden in org flow)
+            Assert.assertTrue(loginPage.isPasswordInputPresent());
+            Assert.assertFalse(loginPage.isRememberMeCheckboxPresent());
+
+            // Submit password
+            loginPage.login(memberPassword);
+            appPage.assertCurrent();
+
+            // Verify the user session was created with rememberMe=true,
+            // proving the auth note survived the two-step org flow
+            List<UserSessionRepresentation> sessions = testRealm().users().get(member.getId()).getUserSessions();
+            Assert.assertEquals(1, sessions.size());
+            Assert.assertTrue("User session should have rememberMe enabled", sessions.get(0).isRememberMe());
+
+            // Also verify the login event records remember_me
+            events.expectLogin()
+                    .client("broker-app")
+                    .user(member.getId())
+                    .detail(Details.USERNAME, email)
+                    .detail(Details.REMEMBER_ME, "true")
+                    .removeDetail(Details.REDIRECT_URI)
+                    .assertEvent();
+        }
+    }
+
+    @Test
+    public void testRememberMeNotCheckedWithOrganizationScope() throws IOException {
+        try (RealmAttributeUpdater rau = new RealmAttributeUpdater(testRealm())
+                .setRememberMe(Boolean.TRUE)
+                .update()) {
+
+            OrganizationResource organization = testRealm().organizations().get(createOrganization().getId());
+            UserRepresentation member = addMember(organization, "contractor@contractor.org");
+            String email = member.getEmail();
+
+            // Open the identity-first login page manually
+            oauth.clientId("broker-app");
+            loginPage.open(bc.consumerRealmName());
+
+            // Verify Remember Me checkbox is present but NOT checked; do not check it
+            Assert.assertTrue(loginPage.isRememberMeCheckboxPresent());
+            Assert.assertFalse(loginPage.isRememberMeChecked());
+
+            // Submit username
+            loginPage.loginUsername(email);
+
+            // Wait for password page
+            waitForPage(driver, "sign in to", true);
+
+            // Submit password
+            loginPage.login(memberPassword);
+            appPage.assertCurrent();
+
+            // Verify the user session was created WITHOUT rememberMe
+            List<UserSessionRepresentation> sessions = testRealm().users().get(member.getId()).getUserSessions();
+            Assert.assertEquals(1, sessions.size());
+            Assert.assertFalse("User session should NOT have rememberMe enabled", sessions.get(0).isRememberMe());
+
+            // Also verify the login event does NOT have remember_me detail
+            EventRepresentation loginEvent = events.expectLogin()
+                    .client("broker-app")
+                    .user(member.getId())
+                    .detail(Details.USERNAME, email)
+                    .removeDetail(Details.REDIRECT_URI)
+                    .assertEvent();
+            assertThat(loginEvent.getDetails().get(Details.REMEMBER_ME), Matchers.nullValue());
+        }
     }
 
     private void runOnServer(RunOnServer function) {

@@ -35,6 +35,7 @@ import org.keycloak.authentication.authenticators.browser.AbstractUsernameFormAu
 import org.keycloak.authentication.authenticators.browser.IdentityProviderAuthenticator;
 import org.keycloak.authentication.authenticators.browser.WebAuthnConditionalUIAuthenticator;
 import org.keycloak.email.freemarker.beans.ProfileBean;
+import org.keycloak.events.Details;
 import org.keycloak.forms.login.LoginFormsProvider;
 import org.keycloak.forms.login.freemarker.model.AuthenticationContextBean;
 import org.keycloak.forms.login.freemarker.model.IdentityProviderBean;
@@ -109,6 +110,18 @@ public class OrganizationAuthenticator extends IdentityProviderAuthenticator {
         HttpRequest request = context.getHttpRequest();
         MultivaluedMap<String, String> parameters = request.getDecodedFormParameters();
         String username = parameters.getFirst(UserModel.USERNAME);
+
+        // preserve the rememberMe selection from the identity-first login form
+        // so it is not lost when the flow continues to the password authenticator
+        String rememberMe = parameters.getFirst("rememberMe");
+        boolean remember = context.getRealm().isRememberMe() && rememberMe != null && rememberMe.equalsIgnoreCase("on");
+        if (remember) {
+            context.getAuthenticationSession().setAuthNote(Details.REMEMBER_ME, "true");
+            context.getEvent().detail(Details.REMEMBER_ME, "true");
+        } else {
+            // in an org-aware authentication flow the rememberMe selection is done here so should be cleaned here.
+            context.getAuthenticationSession().removeAuthNote(Details.REMEMBER_ME);
+        }
 
         // check if it's a webauthn submission and perform the webauth login
         if (webauthnAuth.isPasskeysEnabled() && (parameters.containsKey(WebAuthnConstants.AUTHENTICATOR_DATA)

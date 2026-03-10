@@ -205,7 +205,11 @@ public abstract class AbstractUsernameFormAuthenticator extends AbstractFormAuth
         if (remember) {
             context.getAuthenticationSession().setAuthNote(Details.REMEMBER_ME, "true");
             context.getEvent().detail(Details.REMEMBER_ME, "true");
-        } else {
+        } else if (!isUserAlreadySetBeforeUsernamePasswordAuth(context)) {
+            // Only clear the remember-me note if the rememberMe checkbox was visible on the form.
+            // When the user was already set by a preceding authenticator (e.g. OrganizationAuthenticator),
+            // the username is hidden and the rememberMe checkbox is not rendered, so we must preserve
+            // any remember-me note set by the preceding authenticator.
             context.getAuthenticationSession().removeAuthNote(Details.REMEMBER_ME);
         }
         context.setUser(user);
